@@ -3658,3 +3658,29 @@ dialog::backdrop {
     height: 29px;
   }
 }
+
+/* Keep the front speaker outside the 3D flip plane so it cannot bleed
+   through to the back face on WebKit browsers. */
+.study-stage {
+  position: relative;
+}
+
+.study-speaker-front {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 6;
+}
+
+.study-stage.is-flipped .study-speaker-front {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (max-width: 680px) {
+  .study-speaker-front {
+    top: 14px;
+    right: 14px;
+  }
+}

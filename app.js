@@ -1142,9 +1142,6 @@ function renderStudy() {
     ? spellingCardTemplate(word)
     : `<div class="flashcard${study.flipped ? " is-flipped" : ""}" data-action="flip-card" role="group" aria-label="单词抽认卡">
         <div class="flash-face flash-front">
-          <button class="flash-speak" type="button" data-speak="${escapeAttribute(word.ru)}" aria-label="朗读 ${escapeAttribute(word.ru)}">
-            ${ICONS.speaker}
-          </button>
           <span class="flash-gender">${escapeHtml(positionLabel(word))} · ${lessonName(word.l)}</span>
           <span class="flash-emoji" aria-hidden="true">${word.icon}</span>
           <h3 class="flash-word" lang="ru">${stressHtml(word.ru)}</h3>
@@ -1179,7 +1176,12 @@ function renderStudy() {
     </div>
     <div class="study-progress" aria-hidden="true"><span style="width:${progress}%"></span></div>
     ${studyModeTemplate()}
-    <div class="study-stage">${card}</div>
+    <div class="study-stage${study.flipped ? " is-flipped" : ""}">
+      ${study.mode === "recognition" ? `<button class="flash-speak study-speaker-front" type="button" data-speak="${escapeAttribute(word.ru)}" aria-label="朗读 ${escapeAttribute(word.ru)}">
+        ${ICONS.speaker}
+      </button>` : ""}
+      ${card}
+    </div>
     <div id="studyControls">${studyControlsTemplate()}</div>
   `;
   fitStudyText();
@@ -1190,6 +1192,8 @@ function updateStudyControls() {
   if (controls) controls.innerHTML = studyControlsTemplate();
   const card = elements.studyContent.querySelector(".flashcard");
   if (card) card.classList.toggle("is-flipped", study.flipped);
+  const stage = elements.studyContent.querySelector(".study-stage");
+  if (stage) stage.classList.toggle("is-flipped", study.flipped);
 }
 
 function toggleStudyFlip() {
