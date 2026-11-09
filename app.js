@@ -65,6 +65,21 @@ const ICONS = {
 };
 
 const STORAGE_KEY = "slovo.known.v1";
+const SRS_KEY = "slovo.srs.v2";
+const STUDY_GROUP_SIZE = 20;
+// Ebbinghaus review intervals: 5 min, 30 min, 12 h, 1 d, 2 d, 4 d, 7 d, 15 d, 30 d, 60 d.
+const SRS_INTERVALS = [
+  5 * 60 * 1000,
+  30 * 60 * 1000,
+  12 * 60 * 60 * 1000,
+  24 * 60 * 60 * 1000,
+  2 * 24 * 60 * 60 * 1000,
+  4 * 24 * 60 * 60 * 1000,
+  7 * 24 * 60 * 60 * 1000,
+  15 * 24 * 60 * 60 * 1000,
+  30 * 24 * 60 * 60 * 1000,
+  60 * 24 * 60 * 60 * 1000
+];
 
 const state = {
   lesson: "all",
@@ -78,8 +93,14 @@ const state = {
 const study = {
   queue: [],
   index: 0,
-  flipped: false
+  flipped: false,
+  mode: "recognition",
+  groupNumber: 0,
+  spellingChecked: false,
+  spellingCorrect: null
 };
+
+let srsProgress = loadSrs();
 
 const elements = {
   grid: document.getElementById("wordGrid"),
@@ -153,6 +174,44 @@ function padNumber(value) {
 
 function initialOf(word) {
   return stripStress(word).charAt(0).toUpperCase();
+}
+
+const STRESS_MARK = "\u0301";
+const VOWEL_SET = new Set([...'аеёиоуыэюяАЕЁИОУЫЭЮЯ']);
+
+function stressHtml(value) {
+  return String(value)
+    .split(/(\s+)/)
+    .map((token) => {
+      if (!token || /^\s+$/.test(token)) return token;
+      const chars = [...token];
+      const parts = [];
+      const vowelIndexes = [];
+      let marked = false;
+
+      for (let index = 0; index < chars.length; index += 1) {
+        const char = chars[index];
+        if (char === STRESS_MARK) continue;
+        const isVowel = VOWEL_SET.has(char);
+        const isStressed = chars[index + 1] === STRESS_MARK || char.toLowerCase() === "ё";
+        if (isVowel) vowelIndexes.push(parts.length);
+        if (isStressed) marked = true;
+        parts.push({ char, isStressed });
+      }
+
+      // A word always gets exactly one visible stress position. Words of one
+      // syllable are stressed on their only vowel; ё is inherently stressed.
+      if (!marked && vowelIndexes.length > 0) {
+        parts[vowelIndexes[0]].isStressed = true;
+      }
+
+      return parts
+        .map((part) => part.isStressed
+          ? `<span class="stress">${escapeHtml(part.char)}</span>`
+          : escapeHtml(part.char))
+        .join("");
+    })
+    .join("");
 }
 
 function typeOf(word) {
@@ -253,6 +312,80 @@ function saveKnown() {
   } catch (error) {
     // Storage can be disabled in private browsing; the session still works.
   }
+}
+
+function loadSrs() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(SRS_KEY) || "{}");
+    return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveSrs() {
+  try {
+    localStorage.setItem(SRS_KEY, JSON.stringify(srsProgress));
+  } catch (error) {
+    // Progress still works for the current session if storage is unavailable.
+  }
+}
+
+function getSrs(word) {
+  return srsProgress[word.id] || { stage: 0, due: 0, right: 0, wrong: 0 };
+}
+
+function scheduleWord(word, correct) {
+  const previous = getSrs(word);
+  const now = Date.now();
+  if (correct) {
+    const intervalIndex = Math.min(previous.stage, SRS_INTERVALS.length - 1);
+    const nextStage = Math.min(previous.stage + 1, SRS_INTERVALS.length);
+    srsProgress[word.id] = {
+      stage: nextStage,
+      due: now + SRS_INTERVALS[intervalIndex],
+      right: (previous.right || 0) + 1,
+      wrong: previous.wrong || 0,
+      last: now
+    };
+  } else {
+    srsProgress[word.id] = {
+      stage: 0,
+      due: now + SRS_INTERVALS[0],
+      right: previous.right || 0,
+      wrong: (previous.wrong || 0) + 1,
+      last: now
+    };
+  }
+  saveSrs();
+}
+
+function setWordKnown(word, value) {
+  if (value && !state.known.has(word.id)) {
+    state.known.add(word.id);
+    saveKnown();
+    updateKnownUI();
+  } else if (!value && state.known.has(word.id)) {
+    state.known.delete(word.id);
+    saveKnown();
+    updateKnownUI();
+  }
+}
+
+function normalizeAnswer(value) {
+  return stripStress(String(value))
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[^а-я]/g, "");
+}
+
+function formatDuration(milliseconds) {
+  const minutes = Math.max(1, Math.round(milliseconds / 60000));
+  if (minutes < 60) return `${minutes} 分钟后`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} 小时后`;
+  const days = Math.round(hours / 24);
+  return `${days} 天后`;
 }
 
 function shuffle(items) {
@@ -373,7 +506,7 @@ function cardTemplate(word, index) {
         <span class="card-index">${padNumber(index + 1)} / ${TOTAL}</span>
       </span>
       <span class="card-body">
-        <span class="card-word" lang="ru">${escapeHtml(word.ru)}</span>
+        <span class="card-word" lang="ru">${stressHtml(word.ru)}</span>
         <span class="card-meaning">${escapeHtml(word.zh)}<em>${escapeHtml(word.en)}</em></span>
         <span class="card-footer">
           <span class="card-tags"><span>${escapeHtml(shortPosLabel(word))}</span><span>${escapeHtml(typeTag(word))}</span></span>
@@ -717,7 +850,7 @@ function detailTemplate(word) {
             ${subline.map((item) => `<span class="sep">·</span><span>${escapeHtml(item)}</span>`).join("")}
           </div>
           <div class="detail-title-row">
-            <h2 class="detail-title" id="detailTitle" lang="ru">${escapeHtml(word.ru)}</h2>
+            <h2 class="detail-title" id="detailTitle" lang="ru">${stressHtml(word.ru)}</h2>
             <button class="speak-button" type="button" data-speak="${escapeAttribute(word.ru)}" aria-label="朗读 ${escapeAttribute(word.ru)}">
               ${ICONS.speaker}
             </button>
@@ -820,18 +953,30 @@ function openNextDetail(direction) {
   if (nextIndex >= 0 && nextIndex < TOTAL) openDetailByIndex(nextIndex);
 }
 
-/* ---------- Study mode ---------- */
+/* ---------- Study mode: Ebbinghaus groups + spelling ---------- */
+
+function getStudyGroup() {
+  const base = state.filtered.length ? state.filtered : WORDS;
+  const now = Date.now();
+  const due = base.filter((word) => {
+    const record = srsProgress[word.id];
+    return record && record.due && record.due <= now;
+  });
+  const fresh = base.filter((word) => !srsProgress[word.id]);
+  const rest = base.filter((word) => !due.includes(word) && !fresh.includes(word));
+  const pool = [...shuffle(due), ...shuffle(fresh), ...shuffle(rest)];
+  return pool.slice(0, STUDY_GROUP_SIZE);
+}
 
 function startStudy() {
   if (elements.wordDialog.open) closeDetail();
 
-  const base = state.filtered.length ? state.filtered : WORDS;
-  const learning = base.filter((word) => !state.known.has(word.id));
-  const mastered = base.filter((word) => state.known.has(word.id));
-
-  study.queue = [...shuffle(learning), ...shuffle(mastered)];
+  study.queue = getStudyGroup();
   study.index = 0;
   study.flipped = false;
+  study.spellingChecked = false;
+  study.spellingCorrect = null;
+  study.groupNumber += 1;
 
   if (!elements.studyDialog.open) {
     elements.studyDialog.showModal();
@@ -843,13 +988,44 @@ function startStudy() {
   });
 }
 
+function studyModeTemplate() {
+  return `
+    <div class="study-mode-row">
+      <span class="study-group-label">艾宾浩斯 · ${study.queue.length} 词 / 组</span>
+      <div class="study-mode-switch" role="group" aria-label="背诵方式">
+        <button type="button" data-action="mode" data-mode="recognition" class="${study.mode === "recognition" ? "is-active" : ""}">看词记义</button>
+        <button type="button" data-action="mode" data-mode="spelling" class="${study.mode === "spelling" ? "is-active" : ""}">看义拼词</button>
+      </div>
+    </div>
+  `;
+}
+
 function studyControlsTemplate() {
+  if (study.mode === "spelling") {
+    if (study.spellingChecked) {
+      return `
+        <div class="study-controls">
+          <button class="btn btn--dark" type="button" data-action="next-card">下一个 ${ICONS.arrow}</button>
+        </div>
+        <p class="study-hint"><kbd>Enter</kbd> 下一个 <span>·</span> <kbd>Esc</kbd> 退出</p>
+      `;
+    }
+    return `
+      <div class="study-controls">
+        <button class="btn btn--dark" type="button" data-action="check-spelling">检查拼写</button>
+        <button class="btn btn--ghost" type="button" data-action="skip">跳过</button>
+      </div>
+      <p class="study-hint">想不起来时，点右上角喇叭听发音 <span>·</span> <kbd>Enter</kbd> 检查</p>
+    `;
+  }
+
   if (!study.flipped) {
     return `
       <div class="study-controls">
         <button class="btn btn--dark" type="button" data-action="flip">
           显示答案 ${ICONS.arrow}
         </button>
+        <button class="btn btn--ghost" type="button" data-action="skip">跳过</button>
       </div>
       <p class="study-hint"><kbd>Space</kbd> 翻面 <span>·</span> <kbd>Esc</kbd> 退出</p>
     `;
@@ -882,6 +1058,68 @@ function studyChips(word) {
   return chips.join("");
 }
 
+function fitStudyText() {
+  window.requestAnimationFrame(() => {
+    document.querySelectorAll(".flash-word").forEach((element) => {
+      const face = element.closest(".flash-front");
+      if (face) fitSingleWord(element, face.clientWidth - 44, 20);
+    });
+    document.querySelectorAll(".flash-back-word").forEach((element) => {
+      const head = element.closest(".flash-back-head");
+      if (head) fitSingleWord(element, head.clientWidth - 92, 20);
+    });
+    document.querySelectorAll(".spelling-answer").forEach((element) => {
+      const card = element.closest(".spelling-card");
+      if (card) fitSingleWord(element, card.clientWidth - 54, 18);
+    });
+  });
+}
+
+function fitSingleWord(element, availableWidth, minimumSize) {
+  element.style.fontSize = "";
+  element.style.display = "inline-block";
+  element.style.whiteSpace = "nowrap";
+  const maxWidth = Math.max(120, availableWidth);
+  const baseSize = parseFloat(getComputedStyle(element).fontSize) || 52;
+  let size = baseSize;
+  element.style.fontSize = `${size}px`;
+  while (element.scrollWidth > maxWidth && size > minimumSize) {
+    size -= 2;
+    element.style.fontSize = `${size}px`;
+  }
+}
+
+function spellingCardTemplate(word) {
+  const checked = study.spellingChecked;
+  const correct = study.spellingCorrect;
+  const feedback = checked
+    ? `<div class="spelling-feedback ${correct ? "is-correct" : "is-wrong"}">
+         <span class="spelling-feedback-icon">${correct ? "✓" : "!"}</span>
+         <div>
+           <strong>${correct ? "拼写正确" : "正确拼写"}</strong>
+           <div class="spelling-answer" lang="ru">${stressHtml(word.ru)}</div>
+           ${correct ? "" : '<small>已加入 5 分钟后的复习队列。</small>'}
+         </div>
+       </div>`
+    : `<label class="spelling-label" for="spellInput">俄语拼写</label>
+       <input class="spelling-input" id="spellInput" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="输入俄语单词…">`;
+
+  return `
+    <div class="spelling-card">
+      <div class="spelling-head">
+        <span class="spelling-kicker">看中文 · 拼俄语</span>
+        <button class="flash-speak" type="button" data-speak="${escapeAttribute(word.ru)}" aria-label="朗读 ${escapeAttribute(word.ru)}">
+          ${ICONS.speaker}
+        </button>
+      </div>
+      <p class="spelling-meaning">${escapeHtml(word.zh)}</p>
+      <p class="spelling-en">${escapeHtml(word.en)}</p>
+      <div class="flash-chips">${studyChips(word)}</div>
+      ${feedback}
+    </div>
+  `;
+}
+
 function renderStudy() {
   if (!study.queue.length) {
     renderStudyResult(0);
@@ -900,32 +1138,25 @@ function renderStudy() {
   const progress = ((study.index + 1) / study.queue.length) * 100;
   const remaining = study.queue.length - study.index - 1;
 
-  elements.studyContent.innerHTML = `
-    <div class="study-top">
-      <span class="study-kicker">Карточки · 背诵模式</span>
-      <span class="study-position">${study.index + 1} / ${study.queue.length}</span>
-      <button class="study-close" type="button" data-action="close-study" aria-label="退出背诵模式">
-        ${ICONS.close}
-      </button>
-    </div>
-    <div class="study-progress" aria-hidden="true"><span style="width:${progress}%"></span></div>
-
-    <div class="study-stage">
-      <div class="flashcard${study.flipped ? " is-flipped" : ""}" data-action="flip-card" role="group" aria-label="单词抽认卡">
+  const card = study.mode === "spelling"
+    ? spellingCardTemplate(word)
+    : `<div class="flashcard${study.flipped ? " is-flipped" : ""}" data-action="flip-card" role="group" aria-label="单词抽认卡">
         <div class="flash-face flash-front">
           <button class="flash-speak" type="button" data-speak="${escapeAttribute(word.ru)}" aria-label="朗读 ${escapeAttribute(word.ru)}">
             ${ICONS.speaker}
           </button>
           <span class="flash-gender">${escapeHtml(positionLabel(word))} · ${lessonName(word.l)}</span>
           <span class="flash-emoji" aria-hidden="true">${word.icon}</span>
-          <h3 class="flash-word" lang="ru">${escapeHtml(word.ru)}</h3>
+          <h3 class="flash-word" lang="ru">${stressHtml(word.ru)}</h3>
           <span class="flash-lesson">${remaining ? `还剩 ${remaining} 张` : "最后一张"}</span>
         </div>
         <div class="flash-face flash-back">
           <div class="flash-back-head">
-            <div>
-              <h3 class="flash-back-word" lang="ru">${escapeHtml(word.ru)}</h3>
-              <p class="flash-back-meaning">${escapeHtml(word.zh)}<em>${escapeHtml(word.en)}</em></p>
+            <div class="flash-back-title">
+              <h3 class="flash-back-word" lang="ru">${stressHtml(word.ru)}</h3>
+              <button class="flash-speak flash-speak--inline" type="button" data-speak="${escapeAttribute(word.ru)}" aria-label="朗读 ${escapeAttribute(word.ru)}">
+                ${ICONS.speaker}
+              </button>
             </div>
             <span class="flash-badge" aria-hidden="true">${word.icon}</span>
           </div>
@@ -936,10 +1167,22 @@ function renderStudy() {
             <p class="flash-example-zh">${escapeHtml(firstExample[1])}</p>
           </div>
         </div>
-      </div>
+      </div>`;
+
+  elements.studyContent.innerHTML = `
+    <div class="study-top">
+      <span class="study-kicker">Карточки · 第 ${study.groupNumber} 组</span>
+      <span class="study-position">${study.index + 1} / ${study.queue.length}</span>
+      <button class="study-close" type="button" data-action="close-study" aria-label="退出背诵模式">
+        ${ICONS.close}
+      </button>
     </div>
+    <div class="study-progress" aria-hidden="true"><span style="width:${progress}%"></span></div>
+    ${studyModeTemplate()}
+    <div class="study-stage">${card}</div>
     <div id="studyControls">${studyControlsTemplate()}</div>
   `;
+  fitStudyText();
 }
 
 function updateStudyControls() {
@@ -950,53 +1193,92 @@ function updateStudyControls() {
 }
 
 function toggleStudyFlip() {
-  if (!elements.studyDialog.open || !study.queue.length) return;
+  if (!elements.studyDialog.open || !study.queue.length || study.mode !== "recognition") return;
   if (study.index >= study.queue.length) return;
   study.flipped = !study.flipped;
   updateStudyControls();
+}
+
+function setStudyMode(mode) {
+  if (mode === study.mode) return;
+  study.mode = mode;
+  study.flipped = false;
+  study.spellingChecked = false;
+  study.spellingCorrect = null;
+  renderStudy();
 }
 
 function advanceStudy(direction = 1) {
   if (!elements.studyDialog.open) return;
   study.index = Math.max(0, Math.min(study.queue.length, study.index + direction));
   study.flipped = false;
+  study.spellingChecked = false;
+  study.spellingCorrect = null;
   renderStudy();
+}
+
+function checkSpelling() {
+  const word = study.queue[study.index];
+  if (!word || study.mode !== "spelling" || study.spellingChecked) return;
+  const input = document.getElementById("spellInput");
+  const value = input ? input.value.trim() : "";
+  if (!value) {
+    showToast("先输入俄语单词");
+    if (input) input.focus();
+    return;
+  }
+
+  const correct = normalizeAnswer(value) === normalizeAnswer(word.ru);
+  study.spellingChecked = true;
+  study.spellingCorrect = correct;
+  scheduleWord(word, correct);
+  setWordKnown(word, correct);
+  renderStudy();
+}
+
+function skipStudy() {
+  const word = study.queue[study.index];
+  if (!word) return;
+  scheduleWord(word, true);
+  setWordKnown(word, true);
+  showToast("已跳过，按已掌握记录");
+  advanceStudy(1);
 }
 
 function markStudy(learned) {
   const word = study.queue[study.index];
   if (!word) return;
-
-  if (learned) {
-    if (!state.known.has(word.id)) {
-      state.known.add(word.id);
-      saveKnown();
-      updateKnownUI();
-    }
-  } else if (state.known.has(word.id)) {
-    state.known.delete(word.id);
-    saveKnown();
-    updateKnownUI();
-  }
-
+  scheduleWord(word, learned);
+  setWordKnown(word, learned);
   advanceStudy(1);
 }
 
+function nextReviewLabel(words) {
+  const now = Date.now();
+  const dueTimes = words
+    .map((word) => srsProgress[word.id] && srsProgress[word.id].due)
+    .filter((due) => typeof due === "number" && due > 0)
+    .sort((a, b) => a - b);
+  if (!dueTimes.length) return "完成本组后即可继续";
+  return formatDuration(Math.max(0, dueTimes[0] - now));
+}
+
 function renderStudyResult(studiedCount) {
+  const next = nextReviewLabel(study.queue);
   elements.studyContent.innerHTML = `
     <div class="study-top">
-      <span class="study-kicker">Карточки · 本轮完成</span>
+      <span class="study-kicker">Карточки · 第 ${study.groupNumber} 组完成</span>
       <button class="study-close" type="button" data-action="close-study" aria-label="退出背诵模式">
         ${ICONS.close}
       </button>
     </div>
     <div class="study-result">
       <span class="result-mark">${ICONS.spark}</span>
-      <h3 id="studyTitle">这一轮，读完了。</h3>
-      <p>刚刚复习了 ${studiedCount} 张卡片，词库中已掌握 <strong>${state.known.size}</strong> / ${TOTAL} 个词条。重复不是原地踏步，是让句子慢慢变熟。</p>
+      <h3 id="studyTitle">这一组，完成了。</h3>
+      <p>本组 ${studiedCount} 个单词已按艾宾浩斯曲线安排复习。最早的一次复习在 <strong>${next}</strong>。下一组会重新打乱顺序，优先安排到期和未学过的词。</p>
       <div class="btn-row">
-        <button class="btn btn--dark" type="button" data-action="restart">
-          ${ICONS.restart} 再来一轮
+        <button class="btn btn--dark" type="button" data-action="next-group">
+          继续下一组 ${ICONS.arrow}
         </button>
         <button class="btn btn--outline" type="button" data-action="close-study">返回词汇库</button>
       </div>
@@ -1115,11 +1397,30 @@ function bindEvents() {
       markStudy(true);
     } else if (action === "again") {
       markStudy(false);
+    } else if (action === "skip") {
+      skipStudy();
+    } else if (action === "check-spelling") {
+      checkSpelling();
+    } else if (action === "next-card") {
+      advanceStudy(1);
+    } else if (action === "next-group" || action === "restart") {
+      startStudy();
+    } else if (action === "mode") {
+      setStudyMode(actionButton.dataset.mode);
     } else if (action === "close-study") {
       closeStudy();
-    } else if (action === "restart") {
-      startStudy();
     }
+  });
+
+  elements.studyContent.addEventListener("keydown", (event) => {
+    if (event.target && event.target.id === "spellInput" && event.key === "Enter") {
+      event.preventDefault();
+      checkSpelling();
+    }
+  });
+
+  window.addEventListener("resize", () => {
+    if (elements.studyDialog.open) fitStudyText();
   });
 
   elements.studyDialog.addEventListener("click", (event) => {
@@ -1145,6 +1446,19 @@ function bindEvents() {
       return;
     }
 
+    if (study.mode === "spelling") {
+      if (event.key === "Enter" && study.spellingChecked) {
+        event.preventDefault();
+        advanceStudy(1);
+      } else if (event.key.toLowerCase() === "s" && !study.spellingChecked) {
+        event.preventDefault();
+        skipStudy();
+      } else if (event.key === "Escape") {
+        closeStudy();
+      }
+      return;
+    }
+
     if (event.code === "Space") {
       const activeElement = document.activeElement;
       if (activeElement && activeElement.closest && activeElement.closest("button")) return;
@@ -1156,6 +1470,9 @@ function bindEvents() {
     } else if (event.key === "ArrowLeft") {
       event.preventDefault();
       advanceStudy(-1);
+    } else if (event.key === "s" && !study.flipped) {
+      event.preventDefault();
+      skipStudy();
     } else if (event.key === "1" && study.flipped) {
       event.preventDefault();
       markStudy(false);
